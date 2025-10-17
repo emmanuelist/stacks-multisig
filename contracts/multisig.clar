@@ -65,3 +65,106 @@
         (ok true)
     )
 )
+
+;; Submit a new transaction to the multisig contract
+;; Can only be called by a signer
+;; The transaction can be a transfer of STX or a SIP-010 transfer of a fungible token
+;; The transaction can be of type 0 (STX transfer) or type 1 (SIP-010 transfer)
+;; If the transaction is of type 1, the token contract must be provided
+;; The transaction is not executed immediately, but added to the transactions map
+;; The transaction ID is returned
+(define-public (submit-txn
+        (type uint)
+        (amount uint)
+        (recipient principal)
+        (token (optional principal))
+    )
+    (let ((id (var-get txn-id)))
+        ;; Check if the contract is initialized
+        (asserts! (is-eq (var-get initialized) true) ERR_NOT_INITIALIZED)
+        ;; Check if the sender is a signer
+        (asserts! (is-some (index-of (var-get signers) tx-sender))
+            ERR_NOT_A_SIGNER
+        )
+        ;; Check if the amount is greater than 0
+        (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+        ;; Check if the type is valid (0 for STX transfer, 1 for SIP-010 transfer)
+        (asserts! (or (is-eq type u0) (is-eq type u1)) ERR_INVALID_TX_TYPE)
+        ;; Check if the token is provided for SIP-010 transfers
+        (if (is-eq type u1)
+            (asserts! (is-some token) ERR_NO_TOKEN_CONTRACT_FOR_SIP010_TRANSFER)
+            (asserts! true ERR_UNEXPECTED)
+        )
+        ;; Update the transactions map with the new transaction
+        (map-set transactions { id: id } {
+            type: type,
+            amount: amount,
+            recipient: recipient,
+            token: token,
+            executed: false,
+        })
+        ;; Increment the transaction ID
+        (var-set txn-id (+ id u1))
+        ;; Print the transaction details
+        (print {
+            action: "submit-txn",
+            type: type,
+            amount: amount,
+            recipient: recipient,
+            token: token,
+            submitter: tx-sender,
+        })
+        (ok id)
+    )
+)
+
+;; Execute a SIP-010 transfer transaction
+;; Can only be called by a signer
+;; The transaction must have been submitted by a signer
+;; The transaction must have been signed by the required number of signers
+;; The transaction is executed by transferring the fungible token to the recipient
+(define-public (execute-token-transfer-txn
+        (id uint)
+        (token <ft-trait>)
+        (signatures (list 100 (buff 65)))
+    )
+    (let (
+            (transaction (unwrap-panic (map-get? transactions { id: id })))
+            (transaction-hash (hash-txn id))
+            (total-unique-valid-signatures (get count
+                (fold count-valid-unique-signature signatures {
+                    id: id,
+                    hash: transaction-hash,
+                    count: u0,
+                })
+            ))
+            (txn-type (get type transaction))
+            (amount (get amount transaction))
+            (recipient (get recipient transaction))
+            (token-principal (get token transaction))
+        )
+        (asserts! (is-some (index-of (var-get signers) tx-sender))
+            ERR_NOT_A_SIGNER
+        )
+        (asserts! (>= (len signatures) (var-get threshold))
+            ERR_MIN_THRESHOLD_NOT_MET
+        )
+        (asserts! (>= total-unique-valid-signatures (var-get threshold))
+            ERR_MIN_THRESHOLD_NOT_MET
+        )
+        (asserts! (<= id (var-get txn-id)) ERR_INVALID_TXN_ID)
+        (asserts! (is-eq txn-type u1) ERR_INVALID_TX_TYPE)
+        (asserts! (is-some token-principal) ERR_INVALID_TX_TYPE)
+        (asserts! (is-eq (unwrap-panic token-principal) (contract-of token))
+            ERR_INVALID_TOKEN_CONTRACT
+        )
+        (try! (as-contract (contract-call? token transfer amount tx-sender recipient none)))
+        (map-set transactions { id: id } (merge transaction { executed: true }))
+        (print {
+            action: "execute-token-transfer-txn",
+            id: id,
+            signatures: signatures,
+        })
+        (ok true)
+    )
+)
